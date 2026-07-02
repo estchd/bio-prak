@@ -4,6 +4,11 @@ from src.files.filtered_files import FilteredFiles
 from src.files.renamed_files import RenamedFiles
 from src.files.bgzipped_files import BgzippedFiles
 from src.files.assembled_region_files import AssembledRegionFiles
+from src.files.assembled_region_fasta_files import AssembledRegionFastaFiles
+from src.files.assembled_region_intersects_files import AssembledRegionIntersectsFiles
+from src.files.assembled_region_local_intersects_files import AssembledRegionLocalIntersectsFiles
+from src.files.assembled_region_local_intersects_assembled_files import AssembledRegionLocalIntersectsAssembledFiles
+
 
 class Files:
     def __init__(self, base_path = "data"):
@@ -15,6 +20,10 @@ class Files:
         self.renamed_files = None
         self.bgzipped_files = None
         self.assembled_region_files = None
+        self.assembled_region_fasta_files = None
+        self.assembled_region_intersects_files = None
+        self.assembled_region_local_intersects_files = None
+        self.assembled_region_local_intersects_assembled_files = None
 
     def get_original_files(self):
         if self.original_files == None:
@@ -51,3 +60,36 @@ class Files:
             self.assembled_region_files = AssembledRegionFiles(self.get_renamed_files(), self.base_path)
 
         return self.assembled_region_files
+
+    def get_assembled_region_fasta_files(self):
+        if self.assembled_region_fasta_files == None:
+            self.assembled_region_fasta_files = AssembledRegionFastaFiles(self.get_bgzipped_files(), self.get_assembled_region_files(), self.base_path)
+
+        return self.assembled_region_fasta_files
+
+    def get_assembled_region_intersects_files(self):
+        if self.assembled_region_intersects_files == None:
+            self.assembled_region_intersects_files = AssembledRegionIntersectsFiles(self.get_renamed_files(), self.get_assembled_region_files(), self.base_path)
+
+        return self.assembled_region_intersects_files
+
+    def get_assembled_region_local_intersects_files(self):
+        if self.assembled_region_local_intersects_files == None:
+            self.assembled_region_local_intersects_files = AssembledRegionLocalIntersectsFiles(self.get_assembled_region_intersects_files(), self.base_path)
+
+        return self.assembled_region_local_intersects_files
+
+    def get_assembled_region_local_intersects_assembled_files(self):
+        if self.assembled_region_local_intersects_assembled_files == None:
+            self.assembled_region_local_intersects_assembled_files = AssembledRegionLocalIntersectsAssembledFiles(self.get_assembled_region_local_intersects_files(), self.base_path)
+
+        return self.assembled_region_local_intersects_assembled_files
+
+files = None
+
+def get_files():
+    global files
+    if files == None:
+        files = Files("data")
+
+    return files

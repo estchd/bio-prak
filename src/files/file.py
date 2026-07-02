@@ -112,7 +112,13 @@ class File:
         for prerequisite in self.prerequisites:
             prerequisite.open_or_recompute()
 
-        rmtree(Path(self.path).parent)
+        if self.multipleOutputs == []:
+            try:
+                os.remove(Path(self.path))
+            except:
+                pass
+        else:
+            rmtree(Path(self.path).parent)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
 
         self.computation(self.prerequisites, self.get_possibly_gzip_path(), self.multipleOutputs)

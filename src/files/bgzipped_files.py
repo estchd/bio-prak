@@ -11,6 +11,12 @@ class BgzippedFiles(FileCategory):
         
         self.genome_file = None
 
+    def get_files(self):
+        return [self.get_genome_file()]
+
+    def get_files_dict(self):
+        return {"genome": self.get_genome_file()}
+    
     def get_genome_file(self):
         if self.genome_file == None:
             self.genome_file = File(self.get_file_path_in_category("genome_chr8.fna.bgz"), bgzip_file, self.renamed_files.get_genome_file(), False)

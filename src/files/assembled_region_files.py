@@ -19,7 +19,13 @@ class AssembledRegionFiles(FileCategory):
         self.introns_file = None
         self.non_coding_exons_file = None
         self.non_coding_introns_file = None
-        
+            
+    def get_files(self):
+        return [self.get_3utr_file(), self.get_5utr_file(), self.get_5utr_start_file(), self.get_cds_file(), self.get_coding_exons_file(), self.get_coding_introns_file(), self.get_exons_file(), self.get_introns_file(), self.get_non_coding_exons_file(), self.get_non_coding_introns_file()]
+
+    def get_files_dict(self):
+        return {"3utr": self.get_3utr_file(), "5utr": self.get_5utr_file(), "5utr_start": self.get_5utr_start_file(), "cds": self.get_cds_file(), "coding_exons": self.get_coding_exons_file(), "coding_introns": self.get_coding_introns_file(), "exons": self.get_exons_file(), "introns": self.get_introns_file(), "non_coding_exons": self.get_non_coding_exons_file(), "non_coding_introns": self.get_non_coding_introns_file()}
+
     def multiple_outputs(self):
         return [self.get_3utr_file, self.get_5utr_file, self.get_5utr_start_file, self.get_cds_file, self.get_coding_exons_file, self.get_coding_introns_file, self.get_exons_file, self.get_introns_file, self.get_non_coding_exons_file, self.get_non_coding_introns_file]
     

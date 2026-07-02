@@ -13,6 +13,12 @@ class FullFiles(FileCategory):
         self.annotations_file = None
         self.modifications_file = None
 
+    def get_files(self):
+        return [self.get_genome_file(), self.get_annotations_file(), self.get_modifications_file()]
+        
+    def get_files_dict(self):
+        return {"genome": self.get_genome_file(), "annotations": self.get_annotations_file(), "modifications": self.get_modifications_file()}
+        
     def get_genome_file(self):
         if self.genome_file == None:
             self.genome_file = File(self.get_file_path_in_category("genome.fna"), copy_file, self.original_files.get_genome_file())
