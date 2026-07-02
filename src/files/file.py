@@ -118,7 +118,10 @@ class File:
             except:
                 pass
         else:
-            rmtree(Path(self.path).parent)
+            try:
+                rmtree(Path(self.path).parent)
+            except:
+                pass
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
 
         self.computation(self.prerequisites, self.get_possibly_gzip_path(), self.multipleOutputs)
