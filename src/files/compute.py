@@ -265,7 +265,7 @@ def make_local_modifications(prerequisites, outputFile, multiple_outputs):
                     #print(m6A_pos_local, spliced_nt)
                     m6A_pos_local = l - m6A_pos_local + 1
                     
-                    csv_writer.writerow([row[3], m6A_pos_local - 1, m6A_pos_local])
+                csv_writer.writerow([row[3], m6A_pos_local - 1, m6A_pos_local])
     
     print("Converting intersects in", inputFile, "into local intersects in", outputFile, "done")
 
