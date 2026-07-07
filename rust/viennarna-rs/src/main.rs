@@ -267,7 +267,7 @@ fn accessibility(sequence: &str, footprints: &[isize], window_size: isize, l: is
     data
 }
 
-static DONE_KEYS: &[&str] =&[];
+static DONE_KEYS: &[&str] =&["5utr", "5utr_start", "non_coding_exons"];
 
 static FILE_DICT: &[(&str, &str, &str)] = &[
     (

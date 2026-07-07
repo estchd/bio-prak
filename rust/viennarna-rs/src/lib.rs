@@ -1,1 +1,2 @@
-use librna_sys::*;
+pub mod fold_compound;
+pub mod model_details;
