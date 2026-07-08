@@ -1,12 +1,15 @@
 #![feature(ptr_cast_slice)]
 #![feature(integer_cast_extras)]
+#![feature(mpmc_channel)]
 
-use std::{cmp::{max, min}, collections::HashMap, ffi::{CStr, CString, c_char}, fs::File, io::{BufRead, BufReader, Read}, os::raw::c_void, path::Path, ptr::null};
+use std::{cmp::{max, min}, collections::HashMap, ffi::CString, fs::File, io::Read, os::raw::c_void, path::Path, sync::{mpsc::{Receiver, SyncSender, sync_channel}}, thread::spawn};
 use fasta::read::FastaReader;
-use rayon::prelude::*;
 use flate2::read::MultiGzDecoder;
 use librna_sys::*;
-use rand::{distr::{Alphanumeric, Uniform, uniform::{UniformChar, UniformUsize}}, prelude::*};
+
+use crate::accessibility_file::AccessibilityComputationResult;
+
+mod accessibility_file;
 
 fn get_naive_start(modification: isize, window_size: isize) -> isize {
     modification - window_size
@@ -267,7 +270,7 @@ fn accessibility(sequence: &str, footprints: &[isize], window_size: isize, l: is
     data
 }
 
-static DONE_KEYS: &[&str] =&["5utr", "5utr_start", "non_coding_exons"];
+static DONE_KEYS: &[&str] =&[];
 
 static FILE_DICT: &[(&str, &str, &str)] = &[
     (
@@ -322,207 +325,316 @@ static FILE_DICT: &[(&str, &str, &str)] = &[
     )
 ];
 
-static WINDOW_SIZES: &[isize] = &[150, 200, 350, 400];
-static FOOTPRINTS: &[isize] = &[5, 10, 15, 20, 25, 30];
+static WINDOW_SIZES: &[isize] = &[150, 400];
+static FOOTPRINTS: &[isize] = &[5, 30];
 static L: isize = 100;
 
+struct WorkTask {
+    key: String,
+    region_name: String,
+    interval_sequence: String,
+    start: usize,
+    end: usize,
+    window_size: usize,
+    adjusted_interval_modifications: Vec<usize>,
+}
+
+fn output_thread(key: &str, channel: Receiver<AccessibilityComputationResult>) {
+    println!("{key} writer started");
+
+    let mut num = 0;
+
+    let output_path = format!("../../data/accessibilities/accessibilities_{key}.gz");
+
+    let output_file = File::create(output_path);
+
+    if let Err(err) = output_file  {
+        eprintln!("{key} could not open output file: {err}");
+        return;
+    }
+
+    let output_file = output_file.unwrap();
+
+    let mut output_file = MultiGzDecoder::new(output_file);
+
+    loop {
+        let result = channel.recv();
+
+        if let Ok(result) = result {
+            let write_result = result.write_to(&mut output_file);
+
+            if let Err(err) = write_result  {
+                eprintln!("{key} exiting because write error file: {err}");
+                return;
+            }
+        }
+        else {
+            println!("{key} writer exiting because receiver closed");
+            break;
+        }
+
+        num += 1;
+
+        if num % 100  == 0 {
+            println!("{key} written {num}");
+        }
+    }
+
+    println!("{key} writer exited");
+}
+
+fn input_thread(key: &str, fasta_path: &str, modification_path: &str, channel: std::sync::mpmc::Sender<WorkTask>) {
+    println!("{key}  reader started");
+
+    let regions = load_region_modifications(modification_path);
+
+    let fasta = FastaReader::new(Path::new(fasta_path));
+
+    let mut num_lines = 0;
+    let mut num_work = 0;
+
+    for (i, [description, sequence]) in fasta.enumerate() {
+        num_lines = i;
+        if i % 100 == 0 {
+            println!("{key} read {i}");
+        }
+
+        let name = description.strip_prefix(">").unwrap();
+        let name = name.split(":").next().unwrap();
+
+        if !regions.contains_key(name) {
+            continue;
+        }
+
+        let sequence = sequence.to_uppercase().replace("T", "U");
+        let sequence_length = sequence.len().strict_cast_signed();
+
+        let modifications = &regions[name].modifications;
+        let mut modifications = modifications.clone();
+        modifications.sort();
+
+        if modifications.is_empty() {
+            continue;
+        }
+
+        for window_size in WINDOW_SIZES {
+            let mut intervals: Vec<Interval> = Vec::with_capacity(modifications.len());
+
+            for modification in &modifications {
+                intervals.push(get_interval_from_modification(*modification, *window_size, sequence_length));
+            }
+
+            let mut i = 0;
+
+            while i < intervals.len() - 1 {
+                let interval_a = &intervals[i];
+                let interval_b = &intervals[i + 1];
+
+                if are_intervals_overlapping(interval_a, interval_b) {
+                    let combined_interval = combine_intervals(interval_a, interval_b);
+
+                    intervals[i] = combined_interval;
+                    intervals.remove(i + 1);
+                    continue;
+                }
+
+                i += 1;
+            }
+
+            for interval in intervals {
+                let start = interval.start;
+                let end = interval.end;
+                let interval_modifications = interval.modifications;
+
+                let interval_sequence = &sequence[start as usize..end as usize];
+
+                let adjusted_interval_modifications: Vec<usize> = interval_modifications
+                    .iter()
+                    .map(|modification| *modification - start)
+                    .map(|modification| modification as usize)
+                    .collect();
+
+                for modification in adjusted_interval_modifications.iter() {
+                    if interval_sequence.chars().nth(*modification).unwrap() != 'A' {
+                        eprintln!("Non A modification");
+                    }
+                }
+
+                let work_task = WorkTask {
+                    key: key.to_string(),
+                    region_name: name.to_string(),
+                    interval_sequence: interval_sequence.to_string(),
+                    start: start as usize,
+                    end: end as usize,
+                    window_size: *window_size as usize,
+                    adjusted_interval_modifications,
+                };
+
+                let send_result = channel.send(work_task);
+
+                num_work += 1;
+
+                if send_result.is_err() {
+                    eprintln!("{key} send failed, reader exiting");
+                    return;
+                }
+            }
+        }
+    }
+
+    println!("{key}  reader exiting, read {num_lines}, submitted {num_work} work items");
+}
+
+fn work_thread(thread_index: usize, input_channel: std::sync::mpmc::Receiver<WorkTask>, output_channels: HashMap<String, SyncSender<AccessibilityComputationResult>>) {
+    println!("Work thread {thread_index} started");
+
+    loop {
+        let work = input_channel.recv();
+
+        let work = if let Ok(work) = work {
+            work
+        }
+        else {
+            break;
+        };
+
+        let adjusted_interval_modifications: Vec<isize> = work.adjusted_interval_modifications.iter().map(|modification| *modification as isize).collect();
+
+        let accessibilities_unmod = accessibility(&work.interval_sequence, FOOTPRINTS, work.window_size as isize, L, None);
+        let accessibilities = accessibility(&work.interval_sequence, FOOTPRINTS, work.window_size as isize, L, Some(&adjusted_interval_modifications));
+
+        let output_channel = &output_channels[&work.key];
+
+        for (footprint, fp_accessibilities_unmod) in accessibilities_unmod {
+            for (feature, fp_f_accessibilities_unmod) in fp_accessibilities_unmod {
+                let fp_f_accessibilities_mod = &accessibilities[&footprint][&feature];
+
+                let computation_result = AccessibilityComputationResult {
+                    region_name: work.region_name.clone(),
+                    window_size: work.window_size,
+                    start: work.start,
+                    end: work.end,
+                    footprint: footprint as usize,
+                    feature: feature as usize,
+                    modifications: work.adjusted_interval_modifications.clone(),
+                    accessibilities_unmod: fp_f_accessibilities_unmod,
+                    accessibilities_mod: fp_f_accessibilities_mod.clone(),
+                };
+
+                let send_result = output_channel.send(computation_result);
+
+                if send_result.is_err() {
+                    println!("Work thread {thread_index} exiting because of send error");
+                }
+          }
+        }
+    }
+
+    println!("Work thread {thread_index} exiting");
+}
+
 fn main()  {
-    FILE_DICT.par_iter().for_each(|(key, fasta_path, modification_path)| {
+    println!("Start");
+
+    std::fs::create_dir_all("../../data/accessibilities").unwrap();
+
+    let mut result_channels: HashMap<String, SyncSender<AccessibilityComputationResult>> = HashMap::new();
+
+    let (work_channel_sender, work_channel_receiver) = std::sync::mpmc::channel::<WorkTask>();
+
+    println!("Starting Writers");
+
+    let mut output_handles = Vec::new();
+
+    for (key, _, _) in FILE_DICT.iter() {
         if DONE_KEYS.contains(key) {
-            return;
+            continue;
         }
 
-        println!("{key}");
+        println!("Starting Writer {key}");
 
-        let regions = load_region_modifications(modification_path);
+        let (key_sender, key_receiver) = sync_channel::<AccessibilityComputationResult>(1000);
 
-        let fasta = FastaReader::new(Path::new(fasta_path));
+        result_channels.insert(key.to_string(), key_sender);
 
-        std::fs::create_dir_all("../../data/accessibilities").unwrap();
+        output_handles.push(spawn(move || output_thread(key,  key_receiver)));
+    }
 
-        let output_path = format!("../../data/accessibilities/accessibilities_{key}.gz");
+    println!("Writers Started");
 
-        let output_file = File::create(output_path).unwrap();
+    println!("Starting Readers");
 
-        let output_file = MultiGzDecoder::new(output_file);
+    let mut input_handles = Vec::new();
 
-        let mut csv_builder = csv::WriterBuilder::new();
-
-        csv_builder.flexible(true);
-        csv_builder.has_headers(false);
-        csv_builder.delimiter(b'\t');
-
-        let mut csv_writer = csv_builder.from_writer(output_file);
-
-        for (i, [description, sequence]) in fasta.enumerate() {
-            if i % 100 == 0 {
-                println!("{key} {i}");
-            }
-
-            let name = description.strip_prefix(">").unwrap();
-            let name = name.split(":").next().unwrap();
-
-            if !regions.contains_key(name) {
-                continue;
-            }
-
-            let sequence = sequence.to_uppercase().replace("T", "U");
-            let sequence_length = sequence.len().strict_cast_signed();
-
-            let modifications = &regions[name].modifications;
-            let mut modifications = modifications.clone();
-            modifications.sort();
-
-            if modifications.is_empty() {
-                continue;
-            }
-
-            for window_size in WINDOW_SIZES {
-                let window_size_str = format!("{window_size}");
-
-                let mut intervals: Vec<Interval> = Vec::with_capacity(modifications.len());
-
-                for modification in &modifications {
-                    intervals.push(get_interval_from_modification(*modification, *window_size, sequence_length));
-                }
-
-                let mut i = 0;
-
-                while i < intervals.len() - 1 {
-                    let interval_a = &intervals[i];
-                    let interval_b = &intervals[i + 1];
-
-                    if are_intervals_overlapping(interval_a, interval_b) {
-                        let combined_interval = combine_intervals(interval_a, interval_b);
-
-                        intervals[i] = combined_interval;
-                        intervals.remove(i + 1);
-                        continue;
-                    }
-
-                    i += 1;
-                }
-
-                for interval in intervals {
-                    let start = interval.start;
-                    let end = interval.end;
-                    let interval_modifications = interval.modifications;
-
-                    let start_str = format!("{start}");
-                    let end_str = format!("{end}");
-
-                    let interval_sequence = &sequence[start as usize..end as usize];
-
-                    let adjusted_interval_modifications: Vec<isize> = interval_modifications.iter().map(|modification| *modification - start).collect();
-
-                    let interval_modifications_str: Vec<String> = interval_modifications.iter().map(|modification| format!("{}", *modification)).collect();
-
-                    let interval_modifications_str = interval_modifications_str.join(",");
-
-                    let accessibilities_unmod = accessibility(interval_sequence, FOOTPRINTS, *window_size, L, None);
-                    let accessibilities = accessibility(interval_sequence, FOOTPRINTS, *window_size, L, Some(&adjusted_interval_modifications));
-
-                    for (footprint, fp_accessibilities_unmod) in accessibilities_unmod {
-                        let footprint_str = format!("{footprint}");
-
-                        for (feature, fp_f_accessibilities_unmod) in fp_accessibilities_unmod {
-                            let fp_f_accessibilities_mod = &accessibilities[&footprint][&feature];
-
-                            let fp_f_accessibilities_unmod_str: Vec<String> = fp_f_accessibilities_unmod.iter().map(|modification| format!("{}", *modification)).collect();
-                            let fp_f_accessibilities_mod_str: Vec<String> = fp_f_accessibilities_mod.iter().map(|modification| format!("{}", *modification)).collect();
-
-                            let fp_f_accessibilities_unmod_str = fp_f_accessibilities_unmod_str.join(",");
-                            let fp_f_accessibilities_mod_str = fp_f_accessibilities_mod_str.join(",");
-
-                            csv_writer.write_record([name, window_size_str.as_str(), start_str.as_str(), end_str.as_str(), footprint_str.as_str(), interval_modifications_str.as_str(), fp_f_accessibilities_unmod_str.as_str(), fp_f_accessibilities_mod_str.as_str()]).unwrap();
-                        }
-                    }
-                }
-            }
+    for (key, fasta_path, modification_path) in FILE_DICT.iter() {
+        if DONE_KEYS.contains(key) {
+            continue;
         }
-    });
+
+        println!("Starting Reader {key}");
+
+        let cloned_channel_sender = work_channel_sender.clone();
+
+        input_handles.push(spawn(move || input_thread(key,  fasta_path, modification_path, cloned_channel_sender)));
+    }
+
+    println!("Readers Started");
+
+    println!("Starting Worker Threads");
+
+    let mut work_handles = Vec::new();
+
+    for i in 0..num_cpus::get() {
+        println!("Starting Worker Thread {i}");
+        let cloned_channel_receiver = work_channel_receiver.clone();
+        let cloned_channel_senders = result_channels.clone();
+
+        work_handles.push(spawn(move || work_thread(i, cloned_channel_receiver, cloned_channel_senders)));
+    }
+
+    drop(work_channel_sender);
+    drop(work_channel_receiver);
+    drop(result_channels);
+
+    println!("Worker Threads Started");
+
+    println!("Waiting for input threads");
+
+    for input_handle in input_handles {
+        let join_result = input_handle.join();
+
+        if join_result.is_err() {
+            eprintln!("Input Thread panicked");
+        }
+    }
+
+    println!("All Input threads done");
+
+
+    println!("Waiting for work threads");
+
+    for work_handle in work_handles {
+        let join_result = work_handle.join();
+
+        if join_result.is_err() {
+            eprintln!("Work Thread panicked");
+        }
+    }
+
+    println!("All work threads done");
+
+
+    println!("Waiting for output threads");
+
+    for output_handle in output_handles {
+        let join_result = output_handle.join();
+
+        if join_result.is_err() {
+            eprintln!("Output Thread panicked");
+        }
+    }
+
+    println!("All output threads done");
 
     println!("Done")
 }
-
-/*
-fn main() {
-    let file_path = "./../data/accessibilities/accessibilities_3utr.gz";
-
-    let file = File::open(file_path).unwrap();
-
-    let gzip_file = MultiGzDecoder::new(file);
-
-    let mut csv_builder = csv::ReaderBuilder::new();
-
-    csv_builder.flexible(true);
-    csv_builder.has_headers(false);
-    csv_builder.delimiter(b'\t');
-    csv_builder.trim(csv::Trim::All);
-
-    let mut csv_file = csv_builder.from_reader(gzip_file);
-
-    for line in csv_file.records().filter_map(|line| line.ok()) {
-        let region_name = &line[0];
-
-        let window_size: usize = line[1].parse().unwrap();
-
-        let start: usize = line[2].parse().unwrap();
-
-        let end: usize = line[3].parse().unwrap();
-
-        let modifications: Vec<usize> = line[4]
-            .split(',')
-            .map(|modification| modification.parse::<usize>().unwrap())
-            .collect();
-
-        let footprint: usize = line[5].parse().unwrap();
-
-        let feature: usize = line[6].parse().unwrap();
-
-        let modified = &line[7] == "mod";
-        let accessibilities: Vec<f32> = line[8]
-            .split(',')
-            .map(|accessibilities| accessibilities.parse::<f32>().unwrap())
-            .collect();
-    }
-
-    println!("done");
-}
-
-fn main() {
-    let charset = ['A', 'C', 'G', 'U'];
-
-    loop {
-        let seq: String = rand::rng()
-            .sample_iter(Uniform::try_from(0..charset.len()).unwrap())
-            .take(50)
-            .map(|index|  charset[index])
-            .collect();
-
-        let version: String = VRNA_VERSION.iter().map(|v_char| *v_char as char).collect();
-
-        let c_seq = CString::new(seq.clone()).unwrap();
-
-        let (structure, mfe) = unsafe {
-            let ss = vrna_alloc(c_seq.count_bytes() + 1);
-
-            let fc = vrna_fold_compound(c_seq.as_ptr(), null(), VRNA_OPTION_DEFAULT);
-            let mfe = vrna_mfe(fc, ss as *mut c_char);
-
-            let safe_ss = CStr::from_ptr(ss as *const c_char);
-
-            let ss_string = safe_ss.to_str().unwrap().to_owned();
-
-            vrna_fold_compound_free(fc);
-            free(ss);
-
-            (ss_string, mfe)
-        };
-
-        println!("ViennaRNA version is {version}");
-        println!("{}", seq);
-        println!("{structure} {mfe:6.2}");
-    }
-}
-*/

@@ -9,7 +9,7 @@ pub struct FoldCompound {
 }
 
 impl FoldCompound {
-    pub fn new_cstr(sequence: &CStr, model_details: Option<ModelDetails>) -> Self {
+    pub fn new_cstr(sequence: &CStr, model_details: Option<ModelDetails>, ) -> Self {
         todo!()
     }
 

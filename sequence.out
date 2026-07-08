@@ -1,0 +1,12 @@
+>sequence
+ACAAUGAUGACUUAAAUUACUUUUUGCCGUUUACCCAGCUGAGGUUGUCUUUGAAGAAAUAAUUUUAAGACUGAGA
+..................(((((..((..........)).))))).(((((.(((.......))).)))))..... ( -6.20)
+.....,,,,.,,{,,,..,..,|,,,.........{,{{,{||||{(({{{.,,|},..}}})))}})).),}... [ -8.63]
+............................................................................ {  0.00 d=16.69}
+ frequency of mfe structure in ensemble 0.0192744; ensemble diversity 26.67 
+>sequence_mod
+ACAAUGAUGACUUAAAUUACUUUUUGCCGUUUACCCAGCUGAGGUUGUCUUUGAAGAAAUAAUUUUAAG6CUGAGA
+.(((.((((((((............................)))))))).)))....................... ( -5.90)
+.....,,,,.,,{{{{.....,||,,..,......{{{{{{{|||{{{,,,...,}}.,)))))))}}).}}}... [ -8.47]
+...................................(((...((((((............)))))).....)))... {  0.70 d=16.68}
+ frequency of mfe structure in ensemble 0.0155773; ensemble diversity 25.30 
