@@ -45,30 +45,3 @@ impl AccessibilityComputationResult {
         Ok(())
     }
 }
-
-pub struct AccessibilityComputationResultFile<R: Read> {
-    reader: R
-}
-
-impl<R: Read> AccessibilityComputationResultFile<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader,
-        }
-    }
-}
-
-impl<R: Read> Iterator for AccessibilityComputationResultFile<R> {
-    type Item = AccessibilityComputationResult;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = AccessibilityComputationResult::read_from(&mut self.reader);
-
-        if let Err(err) = result {
-            eprintln!("{err}");
-            return None;
-        }
-
-        Some(result.unwrap())
-    }
-}

@@ -1,71 +1,151 @@
-#![feature(ptr_cast_slice)]
-#![feature(integer_cast_extras)]
-#![feature(mpmc_channel)]
+use std::{collections::{HashMap, VecDeque}, fs::File, io::{Seek, SeekFrom}, os::unix::fs::MetadataExt};
 
-use std::{cmp::{max, min}, collections::HashMap, ffi::CString, fs::File, io::Read, os::raw::c_void, path::Path, sync::{mpsc::{Receiver, SyncSender, sync_channel}}, thread::spawn};
-use fasta::read::FastaReader;
 use flate2::read::MultiGzDecoder;
-use librna_sys::*;
+use librna_sys::{VRNA_EXT_LOOP, VRNA_HP_LOOP, VRNA_INT_LOOP, VRNA_MB_LOOP};
 
-use crate::accessibility_file::AccessibilityComputationResult;
+use crate::accessibility_file::{AccessibilityComputationResult, AccessibilityComputationResultFile};
 
 mod accessibility_file;
+mod possibly_gzip_file;
 
-enum PossiblyGzipFile {
-    Gzip(MultiGzDecoder<File>),
-    Normal(File)
-}
+static LOOP_TYPES: &[(u32, &str)] = &[
+    (VRNA_EXT_LOOP, "external"),
+    (VRNA_HP_LOOP, "hairpin"),
+    (VRNA_INT_LOOP, "internal"),
+    (VRNA_MB_LOOP, "multibranch")
+];
 
-impl Read for PossiblyGzipFile {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        match self {
-            PossiblyGzipFile::Gzip(multi_gz_decoder) => multi_gz_decoder.read(buf),
-            PossiblyGzipFile::Normal(file) => file.read(buf),
+fn loop_type_name(val: u32) -> &'static str {
+    for i in 0..LOOP_TYPES.len() {
+        if LOOP_TYPES[i].0 == val {
+            return LOOP_TYPES[i].1;
         }
     }
-}
 
-fn open_possible_gzip_file(file_path: &str) -> PossiblyGzipFile {
-    let file = File::open(file_path).unwrap();
-
-    if file_path.ends_with(".gz") {
-        let gzip = MultiGzDecoder::new(file);
-
-        PossiblyGzipFile::Gzip(gzip)
-    }
-    else {
-        PossiblyGzipFile::Normal(file)
-    }
+    panic!("Unknown LOOP TYPE {}", val);
 }
 
 fn main()  {
-    let args: Vec<String> = std::env::args().collect();
+    let input_path = "../../data/accessibilities/accessibilities_exons.gz";
 
-    let input_path = &args[1];
-    let output_path = &args[2];
+    let input_file = File::open(input_path).unwrap();
 
-    println!("Binarizing {input_path} to {output_path}");
+    let input_file = AccessibilityComputationResultFile::new(input_file);
 
-    let input_file = open_possible_gzip_file(input_path);
+    let top_n = 10;
 
-    let output_file = File::create(output_path).unwrap();
+    let mut max_accessibilities: HashMap<usize, (f64, VecDeque<(f64, AccessibilityComputationResult)>)> = HashMap::new();
+    let mut min_accessibilities: HashMap<usize, (f64, VecDeque<(f64, AccessibilityComputationResult)>)> = HashMap::new();
 
-    let output_file = MultiGzDecoder::new(output_file);
+    for result in input_file {
+        if result.end - result.start > 5000 {
+            continue;
+        }
 
-    let mut csv_builder = csv::ReaderBuilder::new();
+        let diff: Vec<f64> = result.accessibilities_mod.iter()
+            .zip(result.accessibilities_unmod.iter())
+            .map(|(modified, unmod)| modified - unmod)
+            .collect();
 
-    csv_builder.flexible(true);
-    csv_builder.has_headers(false);
-    csv_builder.delimiter(b'\t');
+        let min = diff.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = diff.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-    let mut csv_reader = csv_builder.from_reader(input_file);
+        if let Some(max_access) = max_accessibilities.get_mut(&result.feature) {
+            if max > max_access.0 {
+                max_access.0 = max;
+                max_access.1.push_front((max, result.clone()));
 
-    for record in  csv_reader.records().filter_map(|record| record.ok()) {
-        let region_name = &record[0];
-        let window_size = &record[1];
-        let start = &record[2];
-        let end = &record[3];
-        let footprint = &record[3];
+                if max_access.1.len() > top_n {
+                    max_access.1.pop_back();
+                }
+            }
+            else {
+                if max_access.1.len() < top_n {
+                    for i in 0..max_access.1.len() {
+                        if max > max_access.1[i].0 {
+                            max_access.1.insert(i, (max, result.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            let mut vec = VecDeque::new();
+
+            vec.push_front((max, result.clone()));
+
+            max_accessibilities.insert(result.feature, (max, vec));
+        }
+
+        if let Some(min_access) = min_accessibilities.get_mut(&result.feature) {
+            if min < min_access.0 {
+                min_access.0 = min;
+                min_access.1.push_front((min, result.clone()));
+
+                if min_access.1.len() > top_n {
+                    min_access.1.pop_back();
+                }
+            }
+            else {
+                if min_access.1.len() < top_n {
+                    for i in 0..min_access.1.len() {
+                        if min < min_access.1[i].0 {
+                            min_access.1.insert(i, (min, result.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            let mut vec = VecDeque::new();
+
+            vec.push_front((min, result.clone()));
+
+            min_accessibilities.insert(result.feature, (min, vec));
+        }
+    }
+
+    for (loop_type, max_access) in max_accessibilities {
+        let translated_loop_type_name = loop_type_name(loop_type as u32);
+
+        let path = format!("../../data/access_max_{}.csv",translated_loop_type_name);
+
+        let output_file = File::create(path).unwrap();
+
+        let mut csv_builder = csv::WriterBuilder::new();
+
+        csv_builder.flexible(true);
+        csv_builder.has_headers(false);
+        csv_builder.delimiter(b'\t');
+
+        let mut csv_file = csv_builder.from_writer(output_file);
+
+        for (max_value, result) in max_access.1 {
+            let modifications: Vec<String> = result.modifications.iter().map(|modif| format!("{}", modif)).collect();
+            csv_file.write_record([&format!("{}", max_value), &result.region_name, &format!("{}", result.footprint), &format!("{}", result.start), &format!("{}", result.end), &modifications.join(",")]).unwrap();
+        }
+    }
+
+
+    for (loop_type, min_access) in min_accessibilities {
+        let translated_loop_type_name = loop_type_name(loop_type as u32);
+
+        let path = format!("../../data/access_min_{}.csv",translated_loop_type_name);
+
+        let output_file = File::create(path).unwrap();
+
+        let mut csv_builder = csv::WriterBuilder::new();
+
+        csv_builder.flexible(true);
+        csv_builder.has_headers(false);
+        csv_builder.delimiter(b'\t');
+
+        let mut csv_file = csv_builder.from_writer(output_file);
+
+        for (min_value, result) in min_access.1 {
+            let modifications: Vec<String> = result.modifications.iter().map(|modif| format!("{}", modif)).collect();
+            csv_file.write_record([&format!("{}", min_value), &result.region_name, &format!("{}", result.footprint), &format!("{}", result.start), &format!("{}", result.end), &modifications.join(",")]).unwrap();
+        }
     }
 
     println!("Done")
